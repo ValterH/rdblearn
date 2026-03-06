@@ -1,41 +1,47 @@
-import pandas as pd
+from loguru import logger
 from sklearn.metrics import roc_auc_score
 from tabpfn import TabPFNClassifier
 
+from rdblearn.constants import TABPFN_DEFAULT_CONFIG
 from rdblearn.datasets import RDBDataset
 from rdblearn.estimator import RDBLearnClassifier
-from rdblearn.constants import TABPFN_DEFAULT_CONFIG
 
-from loguru import logger
 logger.enable("rdblearn")
 
-def main():
+DEFAULT_CLASSIFIER_MODEL_PATH = "tabpfn-v2-classifier-finetuned-zk73skhh.ckpt"
+
+
+def main(
+    dataset_name: str = "rel-f1",
+    task_name: str = "driver-dnf",
+    model_path: str = DEFAULT_CLASSIFIER_MODEL_PATH,
+):
     # 1. Load Dataset
-    # This will download the 'rel-f1' dataset if not present and load the RDB.
-    print("Loading 'rel-f1' dataset...")
-    dataset = RDBDataset.from_relbench("rel-f1")
-    
-    # Select the 'driver-dnf' task
-    task_name = "driver-dnf"
+    # This will download the dataset if not present and load the RDB.
+    print(f"Loading '{dataset_name}' dataset...")
+    dataset = RDBDataset.from_relbench(dataset_name)
+
+    # Select task
     if task_name not in dataset.tasks:
-        raise ValueError(f"Task '{task_name}' not found in dataset. Available tasks: {list(dataset.tasks.keys())}")
-    
+        raise ValueError(
+            f"Task '{task_name}' not found in dataset. Available tasks: {list(dataset.tasks.keys())}"
+        )
+
     task = dataset.tasks[task_name]
     print(f"Loaded task: {task.name}")
     print(f"Train shape: {task.train_df.shape}")
     print(f"Test shape: {task.test_df.shape}")
 
     # 2. Initialize Model
-    # Initialize the base estimator (TabPFN) with default config
     print("Initializing TabPFNClassifier...")
     # Note: You might need to adjust 'device' in TABPFN_DEFAULT_CONFIG if you don't have a GPU
-    base_model = TabPFNClassifier(**TABPFN_DEFAULT_CONFIG)
+    config = dict(TABPFN_DEFAULT_CONFIG)
+    config["model_path"] = model_path
+    base_model = TabPFNClassifier(**config)
 
     # Configure RDBLearn
     # Use the default configuration (automatically loaded if config is None)
-    clf = RDBLearnClassifier(
-        base_estimator=base_model,
-    )
+    clf = RDBLearnClassifier(base_estimator=base_model)
 
     # 3. Train
     print("Training model...")
@@ -44,11 +50,11 @@ def main():
     y_train = task.train_df[task.metadata.target_col]
 
     clf.fit(
-        X=X_train, 
-        y=y_train, 
+        X=X_train,
+        y=y_train,
         rdb=dataset.rdb,
         key_mappings=task.metadata.key_mappings,
-        cutoff_time_column=task.metadata.time_col
+        cutoff_time_column=task.metadata.time_col,
     )
     print("Training complete.")
 
@@ -59,11 +65,41 @@ def main():
 
     # Predict probabilities for AUC
     y_pred_proba = clf.predict_proba(X=X_test)
-    
+
     # 5. Evaluate
     # TabPFN returns probabilities for all classes. For binary classification, we usually take the probability of the positive class (index 1).
-    auc = roc_auc_score(y_test, y_pred_proba[:, 1])
-    print(f"Test AUC: {auc:.4f}")
+    auc = roc_auc_score(y_test, y_pred_proba[:, 1]) * 100
+    print(f"Test AUC: {auc:.2f}")
+
 
 if __name__ == "__main__":
-    main()
+    import argparse
+
+    parser = argparse.ArgumentParser(
+        description="RDBLearn RelBench classification example."
+    )
+    parser.add_argument(
+        "--dataset",
+        type=str,
+        default="rel-f1",
+        help="RelBench dataset name (e.g. rel-f1, rel-event).",
+    )
+    parser.add_argument(
+        "--task",
+        type=str,
+        default="driver-dnf",
+        help="RelBench task name.",
+    )
+    parser.add_argument(
+        "--model-path",
+        type=str,
+        default=DEFAULT_CLASSIFIER_MODEL_PATH,
+        help=("Checkpoint path for TabPFNClassifier."),
+    )
+    args = parser.parse_args()
+
+    main(
+        dataset_name=args.dataset,
+        task_name=args.task,
+        model_path=args.model_path,
+    )
