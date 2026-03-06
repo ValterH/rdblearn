@@ -53,7 +53,8 @@ dependencies = [
     "hyperopt",
     "autogluon.tabular>=1.5.0",
     "tabpfn>=6.3.0",
-    "relbench==1.1.0",
+    "fastdfs @ git+https://github.com/HKUSHXLab/fastdfs.git",
+    "relbench @ git+https://github.com/snap-stanford/relbench.git",
     "wandb>=0.24.0",
 ]
 
