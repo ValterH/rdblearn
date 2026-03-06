@@ -15,6 +15,7 @@ def main(
     dataset_name: str = "rel-f1",
     task_name: str = "driver-dnf",
     model_path: str = DEFAULT_CLASSIFIER_MODEL_PATH,
+    random_state: int | None = None,
 ):
     # 1. Load Dataset
     # This will download the dataset if not present and load the RDB.
@@ -37,11 +38,17 @@ def main(
     # Note: You might need to adjust 'device' in TABPFN_DEFAULT_CONFIG if you don't have a GPU
     config = dict(TABPFN_DEFAULT_CONFIG)
     config["model_path"] = model_path
+    if random_state is not None:
+        # NOTE: the results are not fully reproducible as fastdfs is not deterministic
+        config["random_state"] = random_state
     base_model = TabPFNClassifier(**config)
 
     # Configure RDBLearn
     # Use the default configuration (automatically loaded if config is None)
-    clf = RDBLearnClassifier(base_estimator=base_model)
+    clf = RDBLearnClassifier(
+        base_estimator=base_model,
+        random_state=random_state,
+    )
 
     # 3. Train
     print("Training model...")
@@ -76,8 +83,7 @@ if __name__ == "__main__":
     import argparse
 
     parser = argparse.ArgumentParser(
-        description="RDBLearn RelBench classification example."
-    )
+        description="RDBLearn RelBench classification example.")
     parser.add_argument(
         "--dataset",
         type=str,
@@ -96,10 +102,17 @@ if __name__ == "__main__":
         default=DEFAULT_CLASSIFIER_MODEL_PATH,
         help=("Checkpoint path for TabPFNClassifier."),
     )
+    parser.add_argument(
+        "--random-state",
+        type=int,
+        default=42,
+        help="Random state for reproducibility.",
+    )
     args = parser.parse_args()
 
     main(
         dataset_name=args.dataset,
         task_name=args.task,
         model_path=args.model_path,
+        random_state=args.random_state,
     )

@@ -121,6 +121,8 @@ class SafeLabelEncoderTransformer(BaseEstimator, TransformerMixin):
             le = LabelEncoder()
             # Convert to string to handle mixed types/NaNs consistently
             le.fit(X[col].astype(str))
+            # Use sorted classes so encoding is deterministic regardless of row order in X
+            le.classes_ = np.sort(le.classes_)
             self.label_encoders_[col] = le
         return self
 
