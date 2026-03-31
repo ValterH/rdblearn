@@ -1,15 +1,9 @@
 #!/usr/bin/env python3
 """
-Run RDBLearn classifier on RelBench classification tasks and store results.
+Run RDBLearn regressor on RelBench regression tasks and store results.
 
-Task mapping (dataset -> tasks):
-  event:  ignore, repeat   -> user-ignore, user-repeat
-  f1:     dnf, top3       -> driver-dnf, driver-top3
-  avito:  clicks, visits  -> user-clicks, user-visits
-  hm:     churn           -> user-churn
-  stack:  badge, engagmt  -> user-badge, user-engagement
-  trial:  out             -> study-outcome
-  amazon: user, item      -> user-churn, item-churn
+This script mirrors `examples/relbench_classification.py` but evaluates
+regression tasks using Mean Absolute Error (MAE).
 """
 from __future__ import annotations
 
@@ -18,47 +12,40 @@ import json
 from pathlib import Path
 
 from loguru import logger
-from sklearn.metrics import roc_auc_score
-from tabpfn import TabPFNClassifier
+from sklearn.metrics import mean_absolute_error
+from tabpfn import TabPFNRegressor
 
 from rdblearn.constants import TABPFN_DEFAULT_CONFIG
 from rdblearn.datasets import RDBDataset
-from rdblearn.estimator import RDBLearnClassifier
+from rdblearn.estimator import RDBLearnRegressor
 
 logger.enable("rdblearn")
 
-DEFAULT_MODEL_PATH = "tabpfn-v2-classifier-finetuned-zk73skhh.ckpt"
+DEFAULT_MODEL_PATH = "tabpfn-v2-regressor-v2_default.ckpt"
 
-# (relbench_dataset_name, relbench_task_name) for classification only
-CLASSIFICATION_TASKS = [
+# (relbench_dataset_name, relbench_task_name) for forecasting regression only
+# (exclude autocomplete/link prediction tasks)
+REGRESSION_TASKS = [
     # event
-    ("rel-event", "user-ignore"),
-    ("rel-event", "user-repeat"),
+    ("rel-event", "user-attendance"),
     # f1
-    ("rel-f1", "driver-dnf"),
-    ("rel-f1", "driver-top3"),
+    ("rel-f1", "driver-position"),
     # avito
-    ("rel-avito", "user-clicks"),
-    ("rel-avito", "user-visits"),
-    # hm
-    ("rel-hm", "user-churn"),
-    # stack
-    ("rel-stack", "user-badge"),
-    ("rel-stack", "user-engagement"),
+    ("rel-avito", "ad-ctr"),
     # trial
-    ("rel-trial", "study-outcome"),
+    ("rel-trial", "site-success"),
+    ("rel-trial", "study-adverse"),
+    # hm
+    ("rel-hm", "item-sales"),
+    # stack
+    ("rel-stack", "post-votes"),
     # amazon
-    ("rel-amazon", "user-churn"),
-    ("rel-amazon", "item-churn"),
+    ("rel-amazon", "user-ltv"),
+    ("rel-amazon", "item-ltv"),
     # ratebeer
-    ("rel-ratebeer", "beer-churn"),
-    ("rel-ratebeer", "user-churn"),
-    ("rel-ratebeer", "brewer-dormant"),
-    # mimic
-    ("rel-mimic", "patient-iculengthofstay"),
+    ("rel-ratebeer", "user-count"),
     # arxiv
-    ("rel-arxiv", "paper-citation"),
-    ("rel-arxiv", "author-category"),
+    ("rel-arxiv", "author-publication"),
 ]
 
 
@@ -68,41 +55,40 @@ def run_one(
     model_path: str = DEFAULT_MODEL_PATH,
     random_state: int | None = 42,
 ) -> dict:
-    """Run classifier on a single (dataset, task). Returns dict with dataset, task, auc, error."""
+    """Run regressor on a single (dataset, task). Returns dataset, task, mae, error."""
     dataset = RDBDataset.from_relbench(dataset_name)
     if task_name not in dataset.tasks:
         return {
             "dataset": dataset_name,
             "task": task_name,
-            "auc": None,
+            "mae": None,
             "error": f"Task not found. Available: {list(dataset.tasks.keys())}",
         }
 
     task = dataset.tasks[task_name]
-    # Skip non-classification (e.g. regression tasks that slipped in)
-    tt = getattr(
+    task_type = getattr(
         task.metadata.task_type, "value", str(task.metadata.task_type)
     )
-    if tt != "binary_classification":
+    if str(task_type).lower() != "regression":
         return {
             "dataset": dataset_name,
             "task": task_name,
-            "auc": None,
-            "error": f"Not binary classification (task_type={task.metadata.task_type})",
+            "mae": None,
+            "error": f"Not regression (task_type={task.metadata.task_type})",
         }
 
     config = dict(TABPFN_DEFAULT_CONFIG)
     config["model_path"] = model_path
     if random_state is not None:
+        # NOTE: the results are not fully reproducible as fastdfs is not deterministic.
         config["random_state"] = random_state
-    base_model = TabPFNClassifier(**config)
-    clf = RDBLearnClassifier(
-        base_estimator=base_model, random_state=random_state
-    )
+
+    base_model = TabPFNRegressor(**config)
+    reg = RDBLearnRegressor(base_estimator=base_model, random_state=random_state)
 
     X_train = task.train_df.drop(columns=[task.metadata.target_col])
     y_train = task.train_df[task.metadata.target_col]
-    clf.fit(
+    reg.fit(
         X=X_train,
         y=y_train,
         rdb=dataset.rdb,
@@ -111,51 +97,36 @@ def run_one(
     )
 
     X_test = task.test_df.drop(columns=[task.metadata.target_col])
-    y_test = task.test_df[task.metadata.target_col]
-    y_pred_proba = clf.predict_proba(X=X_test)
-
-    n_classes = y_pred_proba.shape[1]
-    if n_classes == 2:
-        auc = roc_auc_score(y_test, y_pred_proba[:, 1]) * 100
-    else:
-        auc = (
-            roc_auc_score(
-                y_test,
-                y_pred_proba,
-                multi_class="ovr",
-                average="macro",
-            )
-            * 100
-        )
+    y_test = task.test_df[task.metadata.target_col].astype(float)
+    y_pred = reg.predict(X=X_test, output_type="median")
+    mae = mean_absolute_error(y_test, y_pred)
 
     return {
         "dataset": dataset_name,
         "task": task_name,
-        "auc": round(auc, 4),
+        "mae": round(float(mae), 6),
         "error": None,
     }
 
-
 def main(
-    output_path: str = "classification_results.json",
+    output_path: str = "regression_results.json",
     model_path: str = DEFAULT_MODEL_PATH,
     random_state: int | None = 42,
     task_filter: list[str] | None = None,
 ) -> None:
     """
-    Run all classification tasks and write results to output_path (JSON).
+    Run all predefined regression tasks and write results to output_path (JSON).
     task_filter: optional; only run (dataset, task) where name contains one.
     """
     path = Path(output_path)
     path.parent.mkdir(parents=True, exist_ok=True)
     results = []
 
-    for dataset_name, task_name in CLASSIFICATION_TASKS:
-        if task_filter:
-            if not any(
-                f in dataset_name or f in task_name for f in task_filter
-            ):
-                continue
+    for dataset_name, task_name in REGRESSION_TASKS:
+        if task_filter and not any(
+            f in dataset_name or f in task_name for f in task_filter
+        ):
+            continue
         logger.info(f"Running {dataset_name} / {task_name} ...")
         try:
             row = run_one(
@@ -168,47 +139,46 @@ def main(
             row = {
                 "dataset": dataset_name,
                 "task": task_name,
-                "auc": None,
+                "mae": None,
                 "error": str(e),
             }
-        results.append(row)
-        if row.get("auc") is not None:
-            logger.info("  -> AUC: %.2f", row["auc"])
-        else:
-            logger.warning("  -> Skip/Error: %s", row.get("error", ""))
 
-    # Write JSON (list of dicts)
+        results.append(row)
+        if row.get("mae") is not None:
+            logger.info(f"  -> MAE: {row['mae']:.6f}")
+        else:
+            logger.warning(f"  -> Skip/Error: {row.get('error', '')}")
+
     with open(path, "w") as f:
         json.dump(results, f, indent=2)
     logger.info(f"Wrote {len(results)} results to {path}")
 
-    # Also write a compact CSV-like summary
     csv_path = path.with_suffix(".csv")
     with open(csv_path, "w") as f:
-        f.write("dataset,task,auc,error\n")
+        f.write("dataset,task,mae,error\n")
         for r in results:
-            auc = r.get("auc") if r.get("auc") is not None else ""
+            mae = r.get("mae") if r.get("mae") is not None else ""
             err = (r.get("error") or "").replace(",", ";")
-            f.write(f"{r['dataset']},{r['task']},{auc},{err}\n")
+            f.write(f"{r['dataset']},{r['task']},{mae},{err}\n")
     logger.info(f"Wrote summary to {csv_path}")
 
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(
-        description="Run RDBLearn on RelBench classification tasks."
+        description="Run RDBLearn on RelBench regression tasks."
     )
     parser.add_argument(
         "--output",
         "-o",
         type=str,
-        default="classification_results.json",
+        default="regression_results.json",
         help="Output path for results (JSON). A .csv sibling is also written.",
     )
     parser.add_argument(
         "--model-path",
         type=str,
         default=DEFAULT_MODEL_PATH,
-        help="TabPFN classifier checkpoint path.",
+        help="TabPFN regressor checkpoint path.",
     )
     parser.add_argument(
         "--random-state",
