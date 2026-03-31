@@ -159,3 +159,5 @@ Thumbs.db
 
 datasets
 limix_cache
+/results
+*.ckpt

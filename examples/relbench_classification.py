@@ -1,26 +1,17 @@
 #!/usr/bin/env python3
-"""
-Run RDBLearn classifier on RelBench classification tasks and store results.
-
-Task mapping (dataset -> tasks):
-  event:  ignore, repeat   -> user-ignore, user-repeat
-  f1:     dnf, top3       -> driver-dnf, driver-top3
-  avito:  clicks, visits  -> user-clicks, user-visits
-  hm:     churn           -> user-churn
-  stack:  badge, engagmt  -> user-badge, user-engagement
-  trial:  out             -> study-outcome
-  amazon: user, item      -> user-churn, item-churn
-"""
+"""Run RDBLearn classifier on RelBench classification tasks and store results."""
 from __future__ import annotations
 
 import argparse
-import json
-from pathlib import Path
-
 from loguru import logger
 from sklearn.metrics import roc_auc_score
 from tabpfn import TabPFNClassifier
 
+from relbench_benchmark_utils import (
+    load_results_by_key,
+    resolve_output_path,
+    write_results,
+)
 from rdblearn.constants import TABPFN_DEFAULT_CONFIG
 from rdblearn.datasets import RDBDataset
 from rdblearn.estimator import RDBLearnClassifier
@@ -58,7 +49,6 @@ CLASSIFICATION_TASKS = [
     ("rel-mimic", "patient-iculengthofstay"),
     # arxiv
     ("rel-arxiv", "paper-citation"),
-    ("rel-arxiv", "author-category"),
 ]
 
 
@@ -80,10 +70,10 @@ def run_one(
 
     task = dataset.tasks[task_name]
     # Skip non-classification (e.g. regression tasks that slipped in)
-    tt = getattr(
+    task_type = getattr(
         task.metadata.task_type, "value", str(task.metadata.task_type)
     )
-    if tt != "binary_classification":
+    if str(task_type).lower() != "binary_classification":
         return {
             "dataset": dataset_name,
             "task": task_name,
@@ -146,9 +136,17 @@ def main(
     Run all classification tasks and write results to output_path (JSON).
     task_filter: optional; only run (dataset, task) where name contains one.
     """
-    path = Path(output_path)
-    path.parent.mkdir(parents=True, exist_ok=True)
-    results = []
+    path = resolve_output_path(
+        output_path=output_path,
+        default_filename="classification_results.json",
+        results_prefix="classification_results",
+        random_state=random_state,
+    )
+    results_by_key = load_results_by_key(path)
+    existing_keys = set(results_by_key.keys())
+    new_count = 0
+    updated_count = 0
+    error_count = 0
 
     for dataset_name, task_name in CLASSIFICATION_TASKS:
         if task_filter:
@@ -171,26 +169,23 @@ def main(
                 "auc": None,
                 "error": str(e),
             }
-        results.append(row)
-        if row.get("auc") is not None:
-            logger.info("  -> AUC: %.2f", row["auc"])
+        key = (dataset_name, task_name)
+        if key not in existing_keys:
+            new_count += 1
         else:
-            logger.warning("  -> Skip/Error: %s", row.get("error", ""))
+            updated_count += 1
+        results_by_key[key] = row
+        if row.get("error"):
+            error_count += 1
+        if row.get("auc") is not None:
+            logger.info(f"  -> AUC: {row['auc']:.2f}")
+        else:
+            logger.warning(f"  -> Skip/Error: {row.get("error", "")}")
 
-    # Write JSON (list of dicts)
-    with open(path, "w") as f:
-        json.dump(results, f, indent=2)
-    logger.info(f"Wrote {len(results)} results to {path}")
-
-    # Also write a compact CSV-like summary
-    csv_path = path.with_suffix(".csv")
-    with open(csv_path, "w") as f:
-        f.write("dataset,task,auc,error\n")
-        for r in results:
-            auc = r.get("auc") if r.get("auc") is not None else ""
-            err = (r.get("error") or "").replace(",", ";")
-            f.write(f"{r['dataset']},{r['task']},{auc},{err}\n")
-    logger.info(f"Wrote summary to {csv_path}")
+    write_results(path, results_by_key)
+    logger.info(
+        f"Wrote {new_count} new results and updated {updated_count} existing results to {path}; {error_count} errors"
+    )
 
 
 if __name__ == "__main__":
@@ -202,7 +197,7 @@ if __name__ == "__main__":
         "-o",
         type=str,
         default="classification_results.json",
-        help="Output path for results (JSON). A .csv sibling is also written.",
+        help="Output path for results (JSON). Default: classification_results.json (stored under results/, seed suffix when set).",
     )
     parser.add_argument(
         "--model-path",

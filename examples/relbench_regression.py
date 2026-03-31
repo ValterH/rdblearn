@@ -8,13 +8,16 @@ regression tasks using Mean Absolute Error (MAE).
 from __future__ import annotations
 
 import argparse
-import json
-from pathlib import Path
 
 from loguru import logger
 from sklearn.metrics import mean_absolute_error
 from tabpfn import TabPFNRegressor
 
+from relbench_benchmark_utils import (
+    load_results_by_key,
+    resolve_output_path,
+    write_results,
+)
 from rdblearn.constants import TABPFN_DEFAULT_CONFIG
 from rdblearn.datasets import RDBDataset
 from rdblearn.estimator import RDBLearnRegressor
@@ -118,9 +121,17 @@ def main(
     Run all predefined regression tasks and write results to output_path (JSON).
     task_filter: optional; only run (dataset, task) where name contains one.
     """
-    path = Path(output_path)
-    path.parent.mkdir(parents=True, exist_ok=True)
-    results = []
+    path = resolve_output_path(
+        output_path=output_path,
+        default_filename="regression_results.json",
+        results_prefix="regression_results",
+        random_state=random_state,
+    )
+    results_by_key = load_results_by_key(path)
+    existing_keys = set(results_by_key.keys())
+    new_count = 0
+    updated_count = 0
+    error_count = 0
 
     for dataset_name, task_name in REGRESSION_TASKS:
         if task_filter and not any(
@@ -143,24 +154,23 @@ def main(
                 "error": str(e),
             }
 
-        results.append(row)
+        key = (dataset_name, task_name)
+        if key not in existing_keys:
+            new_count += 1
+        else:
+            updated_count += 1
+        results_by_key[key] = row
+        if row.get("error"):
+            error_count += 1
         if row.get("mae") is not None:
             logger.info(f"  -> MAE: {row['mae']:.6f}")
         else:
             logger.warning(f"  -> Skip/Error: {row.get('error', '')}")
 
-    with open(path, "w") as f:
-        json.dump(results, f, indent=2)
-    logger.info(f"Wrote {len(results)} results to {path}")
-
-    csv_path = path.with_suffix(".csv")
-    with open(csv_path, "w") as f:
-        f.write("dataset,task,mae,error\n")
-        for r in results:
-            mae = r.get("mae") if r.get("mae") is not None else ""
-            err = (r.get("error") or "").replace(",", ";")
-            f.write(f"{r['dataset']},{r['task']},{mae},{err}\n")
-    logger.info(f"Wrote summary to {csv_path}")
+    write_results(path, results_by_key)
+    logger.info(
+        f"Wrote {new_count} new results and updated {updated_count} existing results to {path}; {error_count} errors"
+    )
 
 
 if __name__ == "__main__":
@@ -172,7 +182,7 @@ if __name__ == "__main__":
         "-o",
         type=str,
         default="regression_results.json",
-        help="Output path for results (JSON). A .csv sibling is also written.",
+        help="Output path for results (JSON). Default: regression_results.json (stored under results/, seed suffix when set).",
     )
     parser.add_argument(
         "--model-path",
