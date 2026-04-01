@@ -1,18 +1,54 @@
+from typing import Literal
+
 import numpy as np
 import pandas as pd
+from relbench.base import Database, Dataset, EntityTask, Table, TaskType
+from relbench.utils import get_relbench_cache_dir
+from sklearn.metrics import roc_auc_score
 
 from fastdfs.api import create_rdb
 
 from rdblearn.datasets import RDBDataset, Task, TaskMetadata
 
 
+class SyntheticConjunctionDataset(Dataset):
+    def __init__(
+        self,
+        cutoff: pd.Timestamp,
+        cache_dir: str,
+    ) -> None:
+        super().__init__(cache_dir=cache_dir)
+        self.val_timestamp = cutoff - pd.Timedelta(hours=1)
+        self.test_timestamp = cutoff
+
+
+class SyntheticConjunctionTask(EntityTask):
+    entity_col = "entity_id"
+    entity_table = "entity"
+    time_col = "cutoff_time"
+    target_col = "label"
+    task_type = TaskType.BINARY_CLASSIFICATION
+    timedelta = pd.Timedelta(hours=1)
+    metrics = [roc_auc_score]
+    num_eval_timestamps = 1
+
+    def __init__(
+        self,
+        dataset: Dataset,
+        cache_dir: str,
+    ) -> None:
+        super().__init__(dataset=dataset, cache_dir=cache_dir)
+
+
 def make_synthetic_conjunction_dataset(
     n_entities: int = 2000,
-    n_timesteps: int = 6,
+    n_timesteps: int = 20,
     window_size: int = 4,
     train_fraction: float = 0.8,
+    val_fraction: float = 0.1,
+    output_format: Literal["rdbdataset", "relbench"] = "rdbdataset",
     random_state: int = 42,
-) -> RDBDataset:
+) -> RDBDataset | tuple[Dataset, EntityTask]:
     """
     Construct a synthetic relational dataset where:
 
@@ -143,14 +179,26 @@ def make_synthetic_conjunction_dataset(
         }
     )
 
-    # Simple random train / test split
+    # train / val / test split
+    if train_fraction <= 0 or train_fraction >= 1:
+        raise ValueError("train_fraction must be in (0, 1)")
+    if val_fraction < 0 or val_fraction >= 1:
+        raise ValueError("val_fraction must be in [0, 1)")
+    if train_fraction + val_fraction >= 1:
+        raise ValueError("train_fraction + val_fraction must be < 1")
+
     rng_idx = np.random.default_rng(random_state)
     idx = np.arange(len(task_df))
     rng_idx.shuffle(idx)
-    split = int(train_fraction * len(idx))
-    train_idx, test_idx = idx[:split], idx[split:]
+    n = len(idx)
+    train_end = int(train_fraction * n)
+    val_end = train_end + int(val_fraction * n)
+    train_idx = idx[:train_end]
+    val_idx = idx[train_end:val_end]
+    test_idx = idx[val_end:]
 
     train_df = task_df.iloc[train_idx].reset_index(drop=True)
+    val_df = task_df.iloc[val_idx].reset_index(drop=True)
     test_df = task_df.iloc[test_idx].reset_index(drop=True)
 
     # Build RDB with two tables:
@@ -185,9 +233,67 @@ def make_synthetic_conjunction_dataset(
         name="entity-conjunction",
         train_df=train_df,
         test_df=test_df,
-        val_df=None,
+        val_df=val_df,
         metadata=metadata,
     )
 
-    return RDBDataset(rdb=rdb, tasks=[task])
+    rdb_dataset = RDBDataset(rdb=rdb, tasks=[task])
 
+    if output_format == "rdbdataset":
+        return rdb_dataset
+    if output_format != "relbench":
+        raise ValueError("output_format must be either 'rdbdataset' or 'relbench'")
+
+    dataset_name = "synthetic-conjunction"
+    task_name = "entity-conjunction"
+    dataset_cache_dir = (
+        f"{get_relbench_cache_dir()}/{dataset_name}"
+    )
+    task_cache_dir = f"{dataset_cache_dir}/tasks/{task_name}"
+
+    db = Database(
+        table_dict={
+            "entity": Table(
+                df=primary_df,
+                fkey_col_to_pkey_table={},
+                pkey_col="entity_id",
+                time_col=None,
+            ),
+            "transactions": Table(
+                df=transactions_df,
+                fkey_col_to_pkey_table={"entity_id": "entity"},
+                pkey_col=None,
+                time_col="timestamp",
+            ),
+        }
+    )
+    db.save(f"{dataset_cache_dir}/db")
+
+    Table(
+        df=train_df,
+        fkey_col_to_pkey_table={"entity_id": "entity"},
+        pkey_col=None,
+        time_col="cutoff_time",
+    ).save(f"{task_cache_dir}/train.parquet")
+    Table(
+        df=val_df,
+        fkey_col_to_pkey_table={"entity_id": "entity"},
+        pkey_col=None,
+        time_col="cutoff_time",
+    ).save(f"{task_cache_dir}/val.parquet")
+    Table(
+        df=test_df,
+        fkey_col_to_pkey_table={"entity_id": "entity"},
+        pkey_col=None,
+        time_col="cutoff_time",
+    ).save(f"{task_cache_dir}/test.parquet")
+
+    relbench_dataset = SyntheticConjunctionDataset(
+        cutoff=cutoff_time,
+        cache_dir=dataset_cache_dir,
+    )
+    relbench_task = SyntheticConjunctionTask(
+        dataset=relbench_dataset,
+        cache_dir=task_cache_dir,
+    )
+    return relbench_dataset, relbench_task

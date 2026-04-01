@@ -17,9 +17,10 @@ def main(
     # 1. Load synthetic adversarial-style dataset
     print("Loading synthetic conjunction dataset...")
     dataset = make_synthetic_conjunction_dataset(
-        n_timesteps=10,
+        n_timesteps=20,
         window_size=4,
         n_entities=10_000,
+        random_state=random_state,
     )
     task = dataset.tasks["entity-conjunction"]
     print(f"Loaded task: {task.name}")
